@@ -22,8 +22,10 @@ create table if not exists public.user_roles (
 );
 create table if not exists public.tasks (
   id uuid primary key default gen_random_uuid(), title text not null, description text not null default '', coins_reward integer not null default 0,
-  task_link text, category text not null default 'Featured', is_active boolean not null default true, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
+  task_link text, category text not null default 'Featured', is_active boolean not null default true, start_at timestamptz, end_at timestamptz, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
 );
+alter table public.tasks add column if not exists start_at timestamptz;
+alter table public.tasks add column if not exists end_at timestamptz;
 create table if not exists public.user_tasks (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, task_id uuid not null references public.tasks(id) on delete cascade,
   proof_image_url text, status text not null default 'pending' check (status in ('pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
@@ -43,6 +45,12 @@ create table if not exists public.referral_earnings (
 );
 create table if not exists public.site_settings (key text primary key, value text not null);
 insert into public.site_settings(key,value) values ('coin_rate','100'),('referral_bonus','50'),('minimum_withdrawal','500'),('site_name','Cash Coin') on conflict(key) do nothing;
+insert into public.tasks(title,description,coins_reward,task_link,category,is_active)
+select 'Follow Instagram','Follow our official page',100,'https://instagram.com','Social',true
+where not exists(select 1 from public.tasks where lower(title)=lower('Follow Instagram'));
+insert into public.tasks(title,description,coins_reward,task_link,category,is_active)
+select 'Subscribe YouTube','Subscribe to our channel',150,'https://youtube.com','Social',true
+where not exists(select 1 from public.tasks where lower(title)=lower('Subscribe YouTube'));
 
 -- Public proofs bucket. The upsert is safe to run repeatedly.
 insert into storage.buckets(id,name,public) values ('proofs','proofs',true) on conflict(id) do update set public=true;
@@ -91,6 +99,32 @@ exception when others then
 end; $$;
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert on auth.users for each row execute function public.handle_new_user();
+
+create or replace function public.prevent_referral_code_update() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.referral_code is distinct from old.referral_code then raise exception 'Referral code is immutable'; end if;
+  return new;
+end; $$;
+drop trigger if exists profiles_referral_code_immutable on public.profiles;
+create trigger profiles_referral_code_immutable before update on public.profiles for each row execute function public.prevent_referral_code_update();
+
+create or replace function public.approve_deposit_and_upgrade_package(p_deposit_id uuid, p_package_name text)
+returns public.deposits language plpgsql security definer set search_path = public as $$
+declare d public.deposits;
+begin
+  if not public.is_admin() then raise exception 'Admin access required'; end if;
+  if p_package_name not in ('Basic Package','Pro Package','Premium Package') then raise exception 'Invalid package'; end if;
+  update public.deposits set status='approved' where id=p_deposit_id returning * into d;
+  if d.id is null then raise exception 'Deposit not found'; end if;
+  update public.profiles set package_name=p_package_name,package_activated_at=now() where id=d.user_id;
+  return d;
+end; $$;
+grant execute on function public.approve_deposit_and_upgrade_package(uuid,text) to authenticated;
+
+insert into public.user_roles(user_id,role)
+select id,'admin' from public.profiles where lower(email)='muhammaddanyal4949@gmail.com'
+on conflict(user_id) do update set role='admin';
 
 -- Enable RLS on every application table.
 alter table public.profiles enable row level security;
