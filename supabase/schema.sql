@@ -31,7 +31,7 @@ create table if not exists public.user_roles (
   role text not null default 'user' check (role in ('user','admin'))
 );
 create table if not exists public.tasks (
-  id uuid primary key default gen_random_uuid(), title text not null, description text not null default '', coins_reward integer not null default 0,
+  id uuid primary key default gen_random_uuid(), title text not null, description text not null default '', coins_reward integer not null default 1,
   image_url text, task_link text, is_timewall boolean not null default false, reward_percent integer not null default 70, category text not null default 'Featured', is_active boolean not null default true, duration_minutes integer, start_at timestamptz, end_at timestamptz, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
 );
 alter table public.tasks add column if not exists image_url text;
@@ -40,6 +40,9 @@ alter table public.tasks add column if not exists start_at timestamptz;
 alter table public.tasks add column if not exists end_at timestamptz;
 alter table public.tasks add column if not exists is_timewall boolean not null default false;
 alter table public.tasks add column if not exists reward_percent integer not null default 70;
+update public.tasks set coins_reward=1 where coins_reward<1;
+alter table public.tasks drop constraint if exists tasks_coins_reward_check;
+alter table public.tasks add constraint tasks_coins_reward_check check (coins_reward >= 1 and coins_reward <= 100000);
 create table if not exists public.user_tasks (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, task_id uuid not null references public.tasks(id) on delete cascade,
   proof_image_url text, proof_link text, status text not null default 'pending' check (status in ('running','pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
@@ -74,6 +77,17 @@ alter table public.referral_earnings drop constraint if exists referral_earnings
 update public.referral_earnings set amount_coins=coins where amount_coins is null;
 update public.referral_earnings set total_earned_so_far=amount_coins where total_earned_so_far=0;
 create table if not exists public.site_settings (key text primary key, value text not null);
+create table if not exists public.packages_settings (
+  id uuid primary key default gen_random_uuid(), package_key text unique not null,
+  package_name text not null, price_pkr integer not null default 0 check (price_pkr >= 0),
+  daily_task_limit integer not null default 1 check (daily_task_limit >= 0),
+  per_task_coins integer not null default 50 check (per_task_coins >= 0 and per_task_coins <= 100000),
+  min_withdrawal_coins integer not null default 5000 check (min_withdrawal_coins >= 0),
+  is_active boolean not null default true, updated_at timestamptz not null default now()
+);
+insert into public.packages_settings(package_key,package_name,price_pkr,daily_task_limit,per_task_coins,min_withdrawal_coins)
+values ('Free','Free Package',0,1,50,5000),('Starter Package','200 PKR Package',200,5,100,3000),('Basic Package','300 PKR Package',300,6,120,2000),('Pro Package','400 PKR Package',400,8,150,1000),('Premium Package','500 PKR Package',500,10,200,500)
+on conflict(package_key) do nothing;
 insert into public.site_settings(key,value) values ('coin_rate','100'),('referral_bonus','50'),('minimum_withdrawal','500'),('site_name','Cash Coin') on conflict(key) do nothing;
 insert into public.tasks(title,description,coins_reward,task_link,category,is_active)
 select 'Follow Instagram','Follow our official page',100,'https://instagram.com','Social',true
@@ -251,10 +265,12 @@ grant execute on function public.approve_withdrawal(uuid) to authenticated;
 create or replace function public.request_withdrawal(p_amount_coins integer, p_method text, p_account_number text, p_account_title text) returns public.withdrawals
 language plpgsql security definer set search_path = public as $$
 declare p public.profiles; min_coins integer; w public.withdrawals;
+  package_cfg public.packages_settings;
 begin
   select * into p from public.profiles where id=auth.uid();
   if p.id is null then raise exception 'Profile not found'; end if;
-  min_coins := case p.package_name when 'Free' then 5000 when 'Free User' then 5000 when 'Starter Package' then 3000 when 'Basic Package' then 2000 when 'Pro Package' then 1000 when 'Premium Package' then 500 else 5000 end;
+  select * into package_cfg from public.packages_settings where package_key=p.package_name and is_active=true limit 1;
+  min_coins := coalesce(package_cfg.min_withdrawal_coins,5000);
   if p_amount_coins < min_coins then raise exception 'Minimum withdrawal is % coins', min_coins; end if;
   if p_amount_coins > p.withdrawal_wallet then raise exception 'Insufficient withdrawal wallet'; end if;
   if p_method not in ('JazzCash','Easypaisa','Bank') then raise exception 'Invalid payment method'; end if;
@@ -265,9 +281,10 @@ grant execute on function public.request_withdrawal(integer,text,text,text) to a
 
 create or replace function public.purchase_package(p_package_name text) returns public.profiles
 language plpgsql security definer set search_path = public as $$
-declare p public.profiles; price integer;
+declare p public.profiles; price integer; package_cfg public.packages_settings;
 begin
-  price := case p_package_name when 'Starter Package' then 200 when 'Basic Package' then 300 when 'Pro Package' then 400 when 'Premium Package' then 500 else 0 end;
+  select * into package_cfg from public.packages_settings where package_key=p_package_name and is_active=true limit 1;
+  price := coalesce(package_cfg.price_pkr,0);
   if price=0 then raise exception 'Invalid package'; end if;
   select * into p from public.profiles where id=auth.uid() for update;
   if p.id is null then raise exception 'Profile not found'; end if;
@@ -279,11 +296,12 @@ grant execute on function public.purchase_package(text) to authenticated;
 
 create or replace function public.start_task(p_task_id uuid) returns json
 language plpgsql security definer set search_path = public as $$
-declare p public.profiles; daily_limit integer; used_count integer;
+declare p public.profiles; daily_limit integer; used_count integer; package_cfg public.packages_settings;
 begin
   select * into p from public.profiles where id=auth.uid();
   if p.id is null then raise exception 'Profile not found'; end if;
-  daily_limit := case p.package_name when 'Free' then 1 when 'Free User' then 1 when 'Starter Package' then 5 when 'Basic Package' then 6 when 'Pro Package' then 8 when 'Premium Package' then 10 else 1 end;
+  select * into package_cfg from public.packages_settings where package_key=p.package_name and is_active=true limit 1;
+  daily_limit := coalesce(package_cfg.daily_task_limit,1);
   select count(*) into used_count from public.user_tasks where user_id=auth.uid() and submitted_at::date=current_date and status in ('running','pending','approved');
   if used_count >= daily_limit then raise exception 'Daily limit reached'; end if;
   if exists(select 1 from public.user_tasks where user_id=auth.uid() and task_id=p_task_id and status in ('running','pending','approved')) then raise exception 'Task already started'; end if;
@@ -306,9 +324,10 @@ alter table public.deposits enable row level security;
 alter table public.payment_accounts enable row level security;
 alter table public.referral_earnings enable row level security;
 alter table public.site_settings enable row level security;
+alter table public.packages_settings enable row level security;
 
 do $$ declare t text; p text; begin
-  for t in select unnest(array['profiles','user_roles','tasks','user_tasks','withdrawals','deposits','payment_accounts','referral_earnings','site_settings']) loop
+  for t in select unnest(array['profiles','user_roles','tasks','user_tasks','withdrawals','deposits','payment_accounts','referral_earnings','site_settings','packages_settings']) loop
     for p in select policyname from pg_policies where schemaname='public' and tablename=t loop execute format('drop policy if exists %I on public.%I',p,t); end loop;
   end loop;
 end $$;
@@ -334,9 +353,24 @@ create policy participant_referrals on public.referral_earnings for select using
 create policy service_role_full_referrals on public.referral_earnings for all to service_role using(true) with check(true);
 create policy public_read_settings on public.site_settings for select using(true);
 create policy admin_write_settings on public.site_settings for all using(public.is_admin()) with check(public.is_admin());
+create policy public_read_packages_settings on public.packages_settings for select using(true);
+create policy admin_write_packages_settings on public.packages_settings for all using(public.is_admin()) with check(public.is_admin());
+create policy service_role_full_packages_settings on public.packages_settings for all to service_role using(true) with check(true);
 
 -- In Supabase Dashboard > Authentication > Providers > Email, turn off Confirm email for direct signup/login.
 -- Optional one-time cleanup, review before running in production:
 -- delete from auth.users where id not in (select id from public.profiles);
 -- Existing rows with a blank/NULL legacy code can be migrated with:
 -- update public.profiles set referral_code=public.random_referral_code(username) where referral_code is null or btrim(referral_code)='';
+
+-- Shared storage policies for all five public application buckets.
+do $$ begin
+  execute 'drop policy if exists "public read all" on storage.objects';
+  execute 'drop policy if exists "allow upload all" on storage.objects';
+  execute 'drop policy if exists "allow update all" on storage.objects';
+  execute 'drop policy if exists "allow delete all" on storage.objects';
+end $$;
+create policy "public read all" on storage.objects for select using (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
+create policy "allow upload all" on storage.objects for insert to authenticated with check (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
+create policy "allow update all" on storage.objects for update to authenticated using (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
+create policy "allow delete all" on storage.objects for delete to authenticated using (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
