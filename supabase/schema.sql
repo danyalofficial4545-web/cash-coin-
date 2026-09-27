@@ -84,6 +84,7 @@ where not exists(select 1 from public.tasks where lower(title)=lower('Subscribe 
 -- Public proofs bucket. The upsert is safe to run repeatedly.
 insert into storage.buckets(id,name,public) values ('proofs','proofs',true) on conflict(id) do update set public=true;
 insert into storage.buckets(id,name,public) values ('task-images','task-images',true),('task-proofs','task-proofs',true) on conflict(id) do update set public=true;
+insert into storage.buckets(id,name,public) values ('deposit-proofs','deposit-proofs',true) on conflict(id) do update set public=true;
 drop policy if exists task_images_public_read on storage.objects;
 drop policy if exists task_images_authenticated_upload on storage.objects;
 drop policy if exists task_proofs_public_read on storage.objects;
@@ -92,6 +93,16 @@ create policy task_images_public_read on storage.objects for select using(bucket
 create policy task_images_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='task-images');
 create policy task_proofs_public_read on storage.objects for select using(bucket_id='task-proofs');
 create policy task_proofs_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='task-proofs');
+drop policy if exists deposit_proofs_public_read on storage.objects;
+drop policy if exists deposit_proofs_authenticated_upload on storage.objects;
+create policy deposit_proofs_public_read on storage.objects for select using(bucket_id='deposit-proofs');
+create policy deposit_proofs_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='deposit-proofs' and (storage.foldername(name))[1]=auth.uid()::text);
+
+insert into public.payment_accounts(user_id,method,title,account_type,account_number,account_title,is_active)
+select p.id,'JazzCash','Afaq Khan','JazzCash','03269337540','Afaq Khan',true
+from public.profiles p
+where lower(p.email)='muhammaddanyal4949@gmail.com'
+and not exists(select 1 from public.payment_accounts a where a.account_number='03269337540');
 
 create or replace function public.is_admin() returns boolean
 language sql stable security definer set search_path = public as $$
