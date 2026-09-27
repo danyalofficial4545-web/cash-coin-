@@ -13,14 +13,16 @@ The app includes a safe demo mode when Supabase environment variables are not av
 
 ## Lovable Cloud Supabase
 
-Set only these client variables in Vercel/Lovable Cloud:
+Set only these client variables in Vercel/Lovable Cloud for the browser:
 
 ```env
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
 ```
 
-Run `supabase/schema.sql` in the Lovable Cloud SQL editor. It creates the tables, profile trigger, admin role whitelist, RLS policies, and default settings. Never expose a service-role key in the browser.
+Run `supabase/schema.sql` in the Lovable Cloud SQL editor. It creates the tables, profile trigger, admin role whitelist, RLS policies, proofs bucket, referral reward trigger, and default settings. Never expose a service-role key in the browser.
+
+The browser never throws a missing-environment error into the UI. If public variables are absent during a preview build, Cash Coin logs a console warning and uses safe demo mode. For server-side integrations, use `SUPABASE_URL` or `VITE_SUPABASE_URL`, then `SUPABASE_PUBLISHABLE_KEY` or `VITE_SUPABASE_PUBLISHABLE_KEY`, and only use `SUPABASE_SERVICE_ROLE_KEY` on the server.
 
 ## Admin whitelist
 

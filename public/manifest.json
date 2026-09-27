@@ -1,0 +1,10 @@
+{
+  "name": "Cash Coin",
+  "short_name": "Cash Coin",
+  "description": "Earn Coins, Convert to Cash",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#7046e8",
+  "background_color": "#f8f8fc",
+  "icons": []
+}
