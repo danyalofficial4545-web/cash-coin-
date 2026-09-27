@@ -20,6 +20,7 @@ create table if not exists public.profiles (
 alter table public.profiles add column if not exists package_name text not null default 'Free';
 alter table public.profiles add column if not exists package_activated_at timestamptz;
 alter table public.profiles add column if not exists deposit_wallet integer not null default 0;
+alter table public.profiles add column if not exists total_deposits numeric(12,2) not null default 0;
 alter table public.profiles add column if not exists withdrawal_wallet integer not null default 0;
 alter table public.profiles add column if not exists total_tasks_completed integer not null default 0;
 update public.profiles set package_name='Free' where package_name='Free User';
@@ -199,33 +200,20 @@ grant execute on function public.reward_referrer_on_task(uuid,uuid) to authentic
 
 create or replace function public.approve_deposit_and_upgrade_package(p_deposit_id uuid, p_package_name text default 'Basic Package')
 returns public.deposits language plpgsql security definer set search_path = public as $$
-declare d public.deposits; ref_code text; referrer uuid; bonus integer; package_cost integer;
+declare d public.deposits; amount_to_credit numeric(12,2);
 begin
   if not public.is_admin() then raise exception 'Admin access required'; end if;
-  if p_package_name not in ('Starter Package','Basic Package','Pro Package','Premium Package') then raise exception 'Invalid package'; end if;
-  select * into d from public.deposits where id=p_deposit_id;
+  select * into d from public.deposits where id=p_deposit_id for update;
   if d.id is null then raise exception 'Deposit not found'; end if;
   if d.status='approved' then return d; end if;
+  amount_to_credit := coalesce(d.amount_sent, d.amount_pkr);
+  if amount_to_credit is null or amount_to_credit <= 0 then raise exception 'Deposit amount must be greater than zero'; end if;
   update public.deposits set status='approved' where id=p_deposit_id returning * into d;
-  if d.method='package_purchase' then
-    p_package_name := case round(d.amount_pkr)::int when 200 then 'Starter Package' when 300 then 'Basic Package' when 400 then 'Pro Package' when 500 then 'Premium Package' else '' end;
-    if p_package_name='' then raise exception 'Invalid package purchase amount'; end if;
-    package_cost := round(d.amount_pkr*100)::int;
-    update public.profiles set package_name=p_package_name,package_activated_at=now() where id=d.user_id;
-  else
-    update public.profiles set deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
-  end if;
-  select referred_by into ref_code from public.profiles where id=d.user_id;
-  if d.method='package_purchase' and ref_code is not null then
-    select id into referrer from public.profiles where upper(referral_code)=upper(ref_code) and id<>d.user_id limit 1;
-    if referrer is not null then
-      bonus := round(d.amount_pkr*0.10*100)::int;
-      if bonus>0 then
-        insert into public.referral_earnings(referrer_id,referred_id,coins,amount_coins,type) values(referrer,d.user_id,bonus,bonus,'package');
-        update public.profiles set withdrawal_wallet=withdrawal_wallet+bonus where id=referrer;
-      end if;
-    end if;
-  end if;
+  update public.profiles
+    set deposit_wallet=deposit_wallet+round(amount_to_credit)::int,
+        total_deposits=coalesce(total_deposits,0)+amount_to_credit
+    where id=d.user_id;
+  if not found then raise exception 'Profile not found'; end if;
   return d;
 end; $$;
 grant execute on function public.approve_deposit_and_upgrade_package(uuid,text) to authenticated;
@@ -288,8 +276,8 @@ begin
   if price=0 then raise exception 'Invalid package'; end if;
   select * into p from public.profiles where id=auth.uid() for update;
   if p.id is null then raise exception 'Profile not found'; end if;
-  if p.deposit_wallet < price*100 then raise exception 'Insufficient deposit wallet'; end if;
-  update public.profiles set deposit_wallet=deposit_wallet-(price*100),package_name=p_package_name,package_activated_at=now() where id=auth.uid() returning * into p;
+  if p.deposit_wallet < price then raise exception 'Insufficient deposit wallet'; end if;
+  update public.profiles set deposit_wallet=deposit_wallet-price,package_name=p_package_name,package_activated_at=now() where id=auth.uid() returning * into p;
   return p;
 end; $$;
 grant execute on function public.purchase_package(text) to authenticated;
