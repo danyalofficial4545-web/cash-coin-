@@ -85,7 +85,7 @@ where not exists(select 1 from public.tasks where lower(title)=lower('Subscribe 
 -- Public proofs bucket. The upsert is safe to run repeatedly.
 insert into storage.buckets(id,name,public) values ('proofs','proofs',true) on conflict(id) do update set public=true;
 insert into storage.buckets(id,name,public) values ('task-images','task-images',true),('task-proofs','task-proofs',true) on conflict(id) do update set public=true;
-insert into storage.buckets(id,name,public) values ('deposit-proofs','deposit-proofs',true) on conflict(id) do update set public=true;
+insert into storage.buckets(id,name,public) values ('payment-proofs','payment-proofs',true),('deposit-proofs','deposit-proofs',true) on conflict(id) do update set public=true;
 drop policy if exists task_images_public_read on storage.objects;
 drop policy if exists task_images_authenticated_upload on storage.objects;
 drop policy if exists task_proofs_public_read on storage.objects;
@@ -98,6 +98,10 @@ drop policy if exists proofs_public_read on storage.objects;
 drop policy if exists proofs_authenticated_upload on storage.objects;
 create policy proofs_public_read on storage.objects for select using(bucket_id='proofs');
 create policy proofs_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='proofs' and (storage.foldername(name))[1]=auth.uid()::text);
+drop policy if exists payment_proofs_public_read on storage.objects;
+drop policy if exists payment_proofs_authenticated_upload on storage.objects;
+create policy payment_proofs_public_read on storage.objects for select using(bucket_id='payment-proofs');
+create policy payment_proofs_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='payment-proofs' and (storage.foldername(name))[1]=auth.uid()::text);
 drop policy if exists deposit_proofs_public_read on storage.objects;
 drop policy if exists deposit_proofs_authenticated_upload on storage.objects;
 create policy deposit_proofs_public_read on storage.objects for select using(bucket_id='deposit-proofs');
