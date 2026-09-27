@@ -10,8 +10,12 @@ create table if not exists public.profiles (
   coins integer not null default 0 check (coins >= 0),
   total_tasks integer not null default 0,
   is_banned boolean not null default false,
+  package_name text not null default 'Free User' check (package_name in ('Free User','Basic Package','Pro Package','Premium Package')),
+  package_activated_at timestamptz,
   created_at timestamptz not null default now()
 );
+alter table public.profiles add column if not exists package_name text not null default 'Free User';
+alter table public.profiles add column if not exists package_activated_at timestamptz;
 create table if not exists public.user_roles (
   user_id uuid primary key references public.profiles(id) on delete cascade,
   role text not null default 'user' check (role in ('user','admin'))

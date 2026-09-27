@@ -33,6 +33,15 @@ The browser never throws a missing-environment error into the UI. If public vari
 
 Vercel detects Vite automatically. Build command: `npm run build`; output directory: `dist`.
 
+## Packages
+
+- Free User: 500-coin minimum withdrawal and one account.
+- Basic Package: 1,000 PKR deposit, 300-coin minimum.
+- Pro Package: 2,500 PKR deposit, 200-coin minimum.
+- Premium Package: 5,000 PKR deposit, 100-coin minimum with no package limit.
+
+The Wallet page shows the active package and Terms & Conditions are available from Profile. Vercel rewrites are defined in `vercel.json` so `/offers`, `/wallet`, `/profile`, `/terms`, and `/admin/*` load the Vite app instead of returning Not Found.
+
 ## Direct signup
 
 The web client calls `supabase.auth.signUp` and immediately establishes a session (or performs an immediate password login fallback) before redirecting to `/dashboard`. The UI contains no email-verification screen or check-your-email message. For Supabase Auth to return a session immediately, Email provider **Confirm email** must be disabled in the Supabase project settings; this is an Auth provider setting, not a browser environment variable.
