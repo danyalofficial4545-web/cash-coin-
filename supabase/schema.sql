@@ -32,12 +32,14 @@ create table if not exists public.user_roles (
 );
 create table if not exists public.tasks (
   id uuid primary key default gen_random_uuid(), title text not null, description text not null default '', coins_reward integer not null default 0,
-  image_url text, task_link text, category text not null default 'Featured', is_active boolean not null default true, duration_minutes integer, start_at timestamptz, end_at timestamptz, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
+  image_url text, task_link text, is_timewall boolean not null default false, reward_percent integer not null default 70, category text not null default 'Featured', is_active boolean not null default true, duration_minutes integer, start_at timestamptz, end_at timestamptz, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
 );
 alter table public.tasks add column if not exists image_url text;
 alter table public.tasks add column if not exists duration_minutes integer;
 alter table public.tasks add column if not exists start_at timestamptz;
 alter table public.tasks add column if not exists end_at timestamptz;
+alter table public.tasks add column if not exists is_timewall boolean not null default false;
+alter table public.tasks add column if not exists reward_percent integer not null default 70;
 create table if not exists public.user_tasks (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, task_id uuid not null references public.tasks(id) on delete cascade,
   proof_image_url text, proof_link text, status text not null default 'pending' check (status in ('running','pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
@@ -185,6 +187,22 @@ begin
   return d;
 end; $$;
 grant execute on function public.approve_deposit_and_upgrade_package(uuid,text) to authenticated;
+
+create or replace function public.approve_withdrawal(p_withdrawal_id uuid) returns public.withdrawals
+language plpgsql security definer set search_path = public as $$
+declare w public.withdrawals; p public.profiles;
+begin
+  if not public.is_admin() then raise exception 'Admin access required'; end if;
+  select * into w from public.withdrawals where id=p_withdrawal_id for update;
+  if w.id is null then raise exception 'Withdrawal not found'; end if;
+  if w.status='approved' then return w; end if;
+  select * into p from public.profiles where id=w.user_id for update;
+  if p.withdrawal_wallet < w.amount_coins then raise exception 'Insufficient withdrawal wallet'; end if;
+  update public.profiles set withdrawal_wallet=withdrawal_wallet-w.amount_coins,coins=greatest(0,coins-w.amount_coins) where id=w.user_id;
+  update public.withdrawals set status='approved' where id=p_withdrawal_id returning * into w;
+  return w;
+end; $$;
+grant execute on function public.approve_withdrawal(uuid) to authenticated;
 
 create or replace function public.purchase_package(p_package_name text) returns public.profiles
 language plpgsql security definer set search_path = public as $$
