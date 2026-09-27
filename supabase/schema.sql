@@ -362,3 +362,105 @@ create policy "public read all" on storage.objects for select using (bucket_id i
 create policy "allow upload all" on storage.objects for insert to authenticated with check (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
 create policy "allow update all" on storage.objects for update to authenticated using (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
 create policy "allow delete all" on storage.objects for delete to authenticated using (bucket_id in ('proofs','task-images','task-proofs','payment-proofs','deposit-proofs'));
+
+-- Final atomic deposit RPCs used by the admin Deposit History UI.
+
+create or replace function public.approve_deposit(p_deposit_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  d public.deposits;
+  amount_to_credit numeric(12,2);
+begin
+  if not public.is_admin() then
+    raise exception 'Admin access required';
+  end if;
+
+  select * into d
+  from public.deposits
+  where id = p_deposit_id
+  for update;
+
+  if d.id is null then
+    raise exception 'Deposit not found';
+  end if;
+
+  if d.status = 'approved' then
+    return jsonb_build_object(
+      'success', true,
+      'already_approved', true,
+      'amount', coalesce(d.amount_sent, d.amount_pkr),
+      'deposit_id', d.id
+    );
+  end if;
+
+  amount_to_credit := coalesce(d.amount_sent, d.amount_pkr);
+  if amount_to_credit is null or amount_to_credit <= 0 then
+    raise exception 'Deposit amount must be greater than zero';
+  end if;
+
+  update public.deposits
+  set status = 'approved'
+  where id = p_deposit_id
+  returning * into d;
+
+  update public.profiles
+  set
+    deposit_wallet = deposit_wallet + round(amount_to_credit)::integer,
+    total_deposits = coalesce(total_deposits, 0) + amount_to_credit
+  where id = d.user_id;
+
+  if not found then
+    raise exception 'Profile not found for deposit user';
+  end if;
+
+  return jsonb_build_object(
+    'success', true,
+    'already_approved', false,
+    'amount', round(amount_to_credit, 2),
+    'deposit_id', d.id,
+    'user_id', d.user_id
+  );
+end;
+$$;
+
+grant execute on function public.approve_deposit(uuid) to authenticated;
+
+create or replace function public.reject_deposit(p_deposit_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  d public.deposits;
+begin
+  if not public.is_admin() then
+    raise exception 'Admin access required';
+  end if;
+
+  update public.deposits
+  set status = 'rejected'
+  where id = p_deposit_id
+    and status = 'pending'
+  returning * into d;
+
+  if d.id is null then
+    select * into d from public.deposits where id = p_deposit_id;
+    if d.id is null then
+      raise exception 'Deposit not found';
+    end if;
+  end if;
+
+  return jsonb_build_object(
+    'success', true,
+    'deposit_id', d.id,
+    'status', d.status
+  );
+end;
+$$;
+
+grant execute on function public.reject_deposit(uuid) to authenticated;
