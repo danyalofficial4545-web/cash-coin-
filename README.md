@@ -26,9 +26,13 @@ The browser never throws a missing-environment error into the UI. If public vari
 
 ## Admin whitelist
 
-- Emails: `muhammaddanyal4949@gmail.com`, `muhammaddanyal4545@gmail.com`
-- Usernames: `danyal955`, `danyal955163`, `danyal1953`
+- Admin email: `muhammaddanyal4949@gmail.com`
+- No username-based admin access
 
 ## Deployment
 
 Vercel detects Vite automatically. Build command: `npm run build`; output directory: `dist`.
+
+## Direct signup
+
+The web client calls `supabase.auth.signUp` and immediately establishes a session (or performs an immediate password login fallback) before redirecting to `/dashboard`. The UI contains no email-verification screen or check-your-email message. For Supabase Auth to return a session immediately, Email provider **Confirm email** must be disabled in the Supabase project settings; this is an Auth provider setting, not a browser environment variable.

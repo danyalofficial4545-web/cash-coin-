@@ -75,7 +75,7 @@ begin
   requested_ref := nullif(upper(trim(new.raw_user_meta_data->>'referred_by')),'');
   select p.referral_code,p.id into valid_ref,referrer from public.profiles p where upper(p.referral_code)=requested_ref and p.id<>new.id limit 1;
   insert into public.profiles(id,email,username,referral_code,referred_by) values(new.id,new.email,final_username,code,valid_ref) on conflict(id) do nothing;
-  insert into public.user_roles(user_id,role) values(new.id,case when lower(new.email) in ('muhammaddanyal4949@gmail.com','muhammaddanyal4545@gmail.com') then 'admin' else 'user' end) on conflict(user_id) do nothing;
+  insert into public.user_roles(user_id,role) values(new.id,case when lower(new.email)='muhammaddanyal4949@gmail.com' then 'admin' else 'user' end) on conflict(user_id) do nothing;
   if referrer is not null then
     insert into public.referral_earnings(referrer_id,referred_id,coins) values(referrer,new.id,50) on conflict(referrer_id,referred_id) do nothing;
     update public.profiles set coins=coins+50 where id=referrer;
@@ -127,6 +127,7 @@ create policy service_role_full_referrals on public.referral_earnings for all to
 create policy public_read_settings on public.site_settings for select using(true);
 create policy admin_write_settings on public.site_settings for all using(public.is_admin()) with check(public.is_admin());
 
+-- In Supabase Dashboard > Authentication > Providers > Email, turn off Confirm email for direct signup/login.
 -- Optional one-time cleanup, review before running in production:
 -- delete from auth.users where id not in (select id from public.profiles);
 -- Existing rows with a blank/NULL legacy code can be migrated with:
