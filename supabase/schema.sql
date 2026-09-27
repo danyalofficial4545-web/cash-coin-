@@ -40,9 +40,11 @@ alter table public.tasks add column if not exists start_at timestamptz;
 alter table public.tasks add column if not exists end_at timestamptz;
 create table if not exists public.user_tasks (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, task_id uuid not null references public.tasks(id) on delete cascade,
-  proof_image_url text, proof_link text, status text not null default 'pending' check (status in ('pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
+  proof_image_url text, proof_link text, status text not null default 'pending' check (status in ('running','pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
 );
 alter table public.user_tasks add column if not exists proof_link text;
+alter table public.user_tasks drop constraint if exists user_tasks_status_check;
+alter table public.user_tasks add constraint user_tasks_status_check check (status in ('running','pending','approved','rejected'));
 create table if not exists public.withdrawals (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, amount_coins integer not null, amount_pkr numeric(12,2) not null,
   method text not null check (method in ('JazzCash','Easypaisa','Bank')), account_number text not null, account_title text not null, status text not null default 'pending' check (status in ('pending','approved','rejected')), created_at timestamptz not null default now()
@@ -154,7 +156,7 @@ begin
   reward := least(200, 5000-earned);
   running_total := earned + reward;
   insert into public.referral_earnings(referrer_id,referred_id,task_id,coins,amount_coins,total_earned_so_far,type) values(referrer,p_referred_id,p_task_id,reward,reward,running_total,'task');
-  update public.profiles set coins=coins+reward where id=referrer;
+  update public.profiles set coins=coins+reward,withdrawal_wallet=withdrawal_wallet+reward where id=referrer;
 end; $$;
 grant execute on function public.reward_referrer_on_task(uuid,uuid) to authenticated;
 
@@ -168,7 +170,7 @@ begin
   if d.id is null then raise exception 'Deposit not found'; end if;
   if d.status='approved' then return d; end if;
   update public.deposits set status='approved' where id=p_deposit_id returning * into d;
-  update public.profiles set package_name=p_package_name,package_activated_at=now(),deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
+  update public.profiles set deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
   select referred_by into ref_code from public.profiles where id=d.user_id;
   if ref_code is not null then
     select id into referrer from public.profiles where upper(referral_code)=upper(ref_code) and id<>d.user_id limit 1;
@@ -183,6 +185,35 @@ begin
   return d;
 end; $$;
 grant execute on function public.approve_deposit_and_upgrade_package(uuid,text) to authenticated;
+
+create or replace function public.purchase_package(p_package_name text) returns public.profiles
+language plpgsql security definer set search_path = public as $$
+declare p public.profiles; price integer;
+begin
+  price := case p_package_name when 'Starter Package' then 200 when 'Basic Package' then 300 when 'Pro Package' then 400 when 'Premium Package' then 500 else 0 end;
+  if price=0 then raise exception 'Invalid package'; end if;
+  select * into p from public.profiles where id=auth.uid() for update;
+  if p.id is null then raise exception 'Profile not found'; end if;
+  if p.deposit_wallet < price*100 then raise exception 'Insufficient deposit wallet'; end if;
+  update public.profiles set deposit_wallet=deposit_wallet-(price*100),package_name=p_package_name,package_activated_at=now() where id=auth.uid() returning * into p;
+  return p;
+end; $$;
+grant execute on function public.purchase_package(text) to authenticated;
+
+create or replace function public.start_task(p_task_id uuid) returns json
+language plpgsql security definer set search_path = public as $$
+declare p public.profiles; daily_limit integer; used_count integer;
+begin
+  select * into p from public.profiles where id=auth.uid();
+  if p.id is null then raise exception 'Profile not found'; end if;
+  daily_limit := case p.package_name when 'Free' then 1 when 'Free User' then 1 when 'Starter Package' then 5 when 'Basic Package' then 6 when 'Pro Package' then 8 when 'Premium Package' then 10 else 1 end;
+  select count(*) into used_count from public.user_tasks where user_id=auth.uid() and submitted_at::date=current_date and status in ('running','pending','approved');
+  if used_count >= daily_limit then raise exception 'Daily limit reached'; end if;
+  if exists(select 1 from public.user_tasks where user_id=auth.uid() and task_id=p_task_id and status in ('running','pending','approved')) then raise exception 'Task already started'; end if;
+  insert into public.user_tasks(user_id,task_id,status,submitted_at) values(auth.uid(),p_task_id,'running',now()) on conflict(user_id,task_id) do update set status='running',submitted_at=now();
+  return json_build_object('started',true,'used',used_count+1,'limit',daily_limit);
+end; $$;
+grant execute on function public.start_task(uuid) to authenticated;
 
 insert into public.user_roles(user_id,role)
 select id,'admin' from public.profiles where lower(email)='muhammaddanyal4949@gmail.com'
