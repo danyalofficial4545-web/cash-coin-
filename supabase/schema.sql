@@ -52,9 +52,10 @@ create table if not exists public.withdrawals (
   method text not null check (method in ('JazzCash','Easypaisa','Bank')), account_number text not null, account_title text not null, status text not null default 'pending' check (status in ('pending','approved','rejected')), created_at timestamptz not null default now()
 );
 create table if not exists public.deposits (
-  id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, amount_pkr numeric(12,2) not null, method text not null, transaction_id text not null, proof_image text, status text not null default 'pending', created_at timestamptz not null default now()
+  id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, amount_pkr numeric(12,2) not null, method text not null, payment_method text, transaction_id text not null, proof_image text, status text not null default 'pending', created_at timestamptz not null default now()
 );
 alter table public.deposits add column if not exists proof_image text;
+alter table public.deposits add column if not exists payment_method text;
 create table if not exists public.payment_accounts (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, method text not null, title text, account_type text, account_number text not null, account_title text not null, is_active boolean not null default true, created_at timestamptz not null default now(), unique(user_id,method,account_number)
 );
@@ -119,7 +120,7 @@ begin
   while exists(select 1 from public.profiles where lower(username)=lower(final_username)) loop
     final_username := left(base_username,11) || floor(random()*9000+1000)::int;
   end loop;
-  if tg_op = 'INSERT' then code := upper(substring(md5(random()::text) from 1 for 6)) || upper(substring(md5(random()::text) from 1 for 2)); end if;
+  if tg_op = 'INSERT' then code := public.random_referral_code(final_username); end if;
   while exists(select 1 from public.profiles where referral_code=code) loop code := public.random_referral_code(final_username); end loop;
   requested_ref := nullif(upper(trim(new.raw_user_meta_data->>'referred_by')),'');
   select p.referral_code,p.id into valid_ref,referrer from public.profiles p where upper(p.referral_code)=requested_ref and p.id<>new.id limit 1;
@@ -164,7 +165,7 @@ grant execute on function public.reward_referrer_on_task(uuid,uuid) to authentic
 
 create or replace function public.approve_deposit_and_upgrade_package(p_deposit_id uuid, p_package_name text default 'Basic Package')
 returns public.deposits language plpgsql security definer set search_path = public as $$
-declare d public.deposits; ref_code text; referrer uuid; bonus integer;
+declare d public.deposits; ref_code text; referrer uuid; bonus integer; package_cost integer;
 begin
   if not public.is_admin() then raise exception 'Admin access required'; end if;
   if p_package_name not in ('Starter Package','Basic Package','Pro Package','Premium Package') then raise exception 'Invalid package'; end if;
@@ -172,9 +173,16 @@ begin
   if d.id is null then raise exception 'Deposit not found'; end if;
   if d.status='approved' then return d; end if;
   update public.deposits set status='approved' where id=p_deposit_id returning * into d;
-  update public.profiles set deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
+  if d.method='package_purchase' then
+    p_package_name := case round(d.amount_pkr)::int when 200 then 'Starter Package' when 300 then 'Basic Package' when 400 then 'Pro Package' when 500 then 'Premium Package' else '' end;
+    if p_package_name='' then raise exception 'Invalid package purchase amount'; end if;
+    package_cost := round(d.amount_pkr*100)::int;
+    update public.profiles set package_name=p_package_name,package_activated_at=now() where id=d.user_id;
+  else
+    update public.profiles set deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
+  end if;
   select referred_by into ref_code from public.profiles where id=d.user_id;
-  if ref_code is not null then
+  if d.method='package_purchase' and ref_code is not null then
     select id into referrer from public.profiles where upper(referral_code)=upper(ref_code) and id<>d.user_id limit 1;
     if referrer is not null then
       bonus := round(d.amount_pkr*0.10*100)::int;
@@ -187,6 +195,22 @@ begin
   return d;
 end; $$;
 grant execute on function public.approve_deposit_and_upgrade_package(uuid,text) to authenticated;
+
+create or replace function public.approve_task_proof(p_user_task_id uuid) returns public.user_tasks
+language plpgsql security definer set search_path = public as $$
+declare ut public.user_tasks; reward integer;
+begin
+  if not public.is_admin() then raise exception 'Admin access required'; end if;
+  select * into ut from public.user_tasks where id=p_user_task_id for update;
+  if ut.id is null then raise exception 'Proof not found'; end if;
+  if ut.status <> 'pending' then return ut; end if;
+  select coins_reward into reward from public.tasks where id=ut.task_id;
+  update public.user_tasks set status='approved' where id=p_user_task_id returning * into ut;
+  update public.profiles set coins=coins+reward,withdrawal_wallet=withdrawal_wallet+reward,total_tasks=total_tasks+1,total_tasks_completed=total_tasks_completed+1 where id=ut.user_id;
+  perform public.reward_referrer_on_task(ut.user_id,ut.task_id);
+  return ut;
+end; $$;
+grant execute on function public.approve_task_proof(uuid) to authenticated;
 
 create or replace function public.approve_withdrawal(p_withdrawal_id uuid) returns public.withdrawals
 language plpgsql security definer set search_path = public as $$
@@ -203,6 +227,21 @@ begin
   return w;
 end; $$;
 grant execute on function public.approve_withdrawal(uuid) to authenticated;
+
+create or replace function public.request_withdrawal(p_amount_coins integer, p_method text, p_account_number text, p_account_title text) returns public.withdrawals
+language plpgsql security definer set search_path = public as $$
+declare p public.profiles; min_coins integer; w public.withdrawals;
+begin
+  select * into p from public.profiles where id=auth.uid();
+  if p.id is null then raise exception 'Profile not found'; end if;
+  min_coins := case p.package_name when 'Free' then 5000 when 'Free User' then 5000 when 'Starter Package' then 3000 when 'Basic Package' then 2000 when 'Pro Package' then 1000 when 'Premium Package' then 500 else 5000 end;
+  if p_amount_coins < min_coins then raise exception 'Minimum withdrawal is % coins', min_coins; end if;
+  if p_amount_coins > p.withdrawal_wallet then raise exception 'Insufficient withdrawal wallet'; end if;
+  if p_method not in ('JazzCash','Easypaisa','Bank') then raise exception 'Invalid payment method'; end if;
+  insert into public.withdrawals(user_id,amount_coins,amount_pkr,method,account_number,account_title) values(auth.uid(),p_amount_coins,round(p_amount_coins/100.0,2),p_method,p_account_number,p_account_title) returning * into w;
+  return w;
+end; $$;
+grant execute on function public.request_withdrawal(integer,text,text,text) to authenticated;
 
 create or replace function public.purchase_package(p_package_name text) returns public.profiles
 language plpgsql security definer set search_path = public as $$
