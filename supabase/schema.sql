@@ -22,14 +22,17 @@ create table if not exists public.user_roles (
 );
 create table if not exists public.tasks (
   id uuid primary key default gen_random_uuid(), title text not null, description text not null default '', coins_reward integer not null default 0,
-  task_link text, category text not null default 'Featured', is_active boolean not null default true, start_at timestamptz, end_at timestamptz, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
+  image_url text, task_link text, category text not null default 'Featured', is_active boolean not null default true, duration_minutes integer, start_at timestamptz, end_at timestamptz, created_by uuid references public.profiles(id), created_at timestamptz not null default now()
 );
+alter table public.tasks add column if not exists image_url text;
+alter table public.tasks add column if not exists duration_minutes integer;
 alter table public.tasks add column if not exists start_at timestamptz;
 alter table public.tasks add column if not exists end_at timestamptz;
 create table if not exists public.user_tasks (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, task_id uuid not null references public.tasks(id) on delete cascade,
-  proof_image_url text, status text not null default 'pending' check (status in ('pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
+  proof_image_url text, proof_link text, status text not null default 'pending' check (status in ('pending','approved','rejected')), rejection_reason text, submitted_at timestamptz not null default now(), unique(user_id,task_id)
 );
+alter table public.user_tasks add column if not exists proof_link text;
 create table if not exists public.withdrawals (
   id uuid primary key default gen_random_uuid(), user_id uuid not null references public.profiles(id) on delete cascade, amount_coins integer not null, amount_pkr numeric(12,2) not null,
   method text not null check (method in ('JazzCash','Easypaisa','Bank')), account_number text not null, account_title text not null, status text not null default 'pending' check (status in ('pending','approved','rejected')), created_at timestamptz not null default now()
@@ -58,6 +61,15 @@ where not exists(select 1 from public.tasks where lower(title)=lower('Subscribe 
 
 -- Public proofs bucket. The upsert is safe to run repeatedly.
 insert into storage.buckets(id,name,public) values ('proofs','proofs',true) on conflict(id) do update set public=true;
+insert into storage.buckets(id,name,public) values ('task-images','task-images',true),('task-proofs','task-proofs',true) on conflict(id) do update set public=true;
+drop policy if exists task_images_public_read on storage.objects;
+drop policy if exists task_images_authenticated_upload on storage.objects;
+drop policy if exists task_proofs_public_read on storage.objects;
+drop policy if exists task_proofs_authenticated_upload on storage.objects;
+create policy task_images_public_read on storage.objects for select using(bucket_id='task-images');
+create policy task_images_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='task-images');
+create policy task_proofs_public_read on storage.objects for select using(bucket_id='task-proofs');
+create policy task_proofs_authenticated_upload on storage.objects for insert to authenticated with check(bucket_id='task-proofs');
 
 create or replace function public.is_admin() returns boolean
 language sql stable security definer set search_path = public as $$
