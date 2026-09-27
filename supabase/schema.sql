@@ -16,6 +16,12 @@ create table if not exists public.profiles (
 );
 alter table public.profiles add column if not exists package_name text not null default 'Free User';
 alter table public.profiles add column if not exists package_activated_at timestamptz;
+alter table public.profiles add column if not exists deposit_wallet integer not null default 0;
+alter table public.profiles add column if not exists withdrawal_wallet integer not null default 0;
+alter table public.profiles add column if not exists total_tasks_completed integer not null default 0;
+alter table public.profiles drop constraint if exists profiles_package_name_check;
+alter table public.profiles add constraint profiles_package_name_check check (package_name in ('Free','Free User','Basic Package','Pro Package','Premium Package'));
+alter table public.profiles alter column package_name set default 'Free';
 create table if not exists public.user_roles (
   user_id uuid primary key references public.profiles(id) on delete cascade,
   role text not null default 'user' check (role in ('user','admin'))
@@ -50,6 +56,10 @@ alter table public.payment_accounts add column if not exists is_active boolean n
 create table if not exists public.referral_earnings (
   id uuid primary key default gen_random_uuid(), referrer_id uuid not null references public.profiles(id) on delete cascade, referred_id uuid not null references public.profiles(id) on delete cascade, coins integer not null default 50, created_at timestamptz not null default now(), unique(referrer_id,referred_id)
 );
+alter table public.referral_earnings add column if not exists amount_coins integer;
+alter table public.referral_earnings add column if not exists type text not null default 'task';
+alter table public.referral_earnings drop constraint if exists referral_earnings_referrer_id_referred_id_key;
+update public.referral_earnings set amount_coins=coins where amount_coins is null;
 create table if not exists public.site_settings (key text primary key, value text not null);
 insert into public.site_settings(key,value) values ('coin_rate','100'),('referral_bonus','50'),('minimum_withdrawal','500'),('site_name','Cash Coin') on conflict(key) do nothing;
 insert into public.tasks(title,description,coins_reward,task_link,category,is_active)
@@ -104,10 +114,6 @@ begin
   select p.referral_code,p.id into valid_ref,referrer from public.profiles p where upper(p.referral_code)=requested_ref and p.id<>new.id limit 1;
   insert into public.profiles(id,email,username,referral_code,referred_by) values(new.id,new.email,final_username,code,valid_ref) on conflict(id) do nothing;
   insert into public.user_roles(user_id,role) values(new.id,case when lower(new.email)='muhammaddanyal4949@gmail.com' then 'admin' else 'user' end) on conflict(user_id) do nothing;
-  if referrer is not null then
-    insert into public.referral_earnings(referrer_id,referred_id,coins) values(referrer,new.id,50) on conflict(referrer_id,referred_id) do nothing;
-    update public.profiles set coins=coins+50 where id=referrer;
-  end if;
   return new;
 exception when others then
   raise log '[Cash Coin] handle_new_user failed for %: %',new.id,sqlerrm;
@@ -125,15 +131,43 @@ end; $$;
 drop trigger if exists profiles_referral_code_immutable on public.profiles;
 create trigger profiles_referral_code_immutable before update on public.profiles for each row execute function public.prevent_referral_code_update();
 
+create or replace function public.reward_referrer_on_task(p_referred_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare ref_code text; referrer uuid; earned integer; reward integer;
+begin
+  select referred_by into ref_code from public.profiles where id=p_referred_id;
+  if ref_code is null then return; end if;
+  select id into referrer from public.profiles where upper(referral_code)=upper(ref_code) and id<>p_referred_id limit 1;
+  if referrer is null then return; end if;
+  select coalesce(sum(amount_coins),0) into earned from public.referral_earnings
+    where referrer_id=referrer and referred_id=p_referred_id and type='task';
+  if earned>=5000 then return; end if;
+  reward := least(200, 5000-earned);
+  insert into public.referral_earnings(referrer_id,referred_id,coins,amount_coins,type) values(referrer,p_referred_id,reward,reward,'task');
+  update public.profiles set coins=coins+reward where id=referrer;
+end; $$;
+grant execute on function public.reward_referrer_on_task(uuid) to authenticated;
+
 create or replace function public.approve_deposit_and_upgrade_package(p_deposit_id uuid, p_package_name text default 'Basic Package')
 returns public.deposits language plpgsql security definer set search_path = public as $$
-declare d public.deposits;
+declare d public.deposits; ref_code text; referrer uuid; bonus integer;
 begin
   if not public.is_admin() then raise exception 'Admin access required'; end if;
   if p_package_name not in ('Basic Package','Pro Package','Premium Package') then raise exception 'Invalid package'; end if;
   update public.deposits set status='approved' where id=p_deposit_id returning * into d;
   if d.id is null then raise exception 'Deposit not found'; end if;
-  update public.profiles set package_name=p_package_name,package_activated_at=now() where id=d.user_id;
+  update public.profiles set package_name=p_package_name,package_activated_at=now(),deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
+  select referred_by into ref_code from public.profiles where id=d.user_id;
+  if ref_code is not null then
+    select id into referrer from public.profiles where upper(referral_code)=upper(ref_code) and id<>d.user_id limit 1;
+    if referrer is not null then
+      bonus := round(d.amount_pkr*0.10*100)::int;
+      if bonus>0 then
+        insert into public.referral_earnings(referrer_id,referred_id,coins,amount_coins,type) values(referrer,d.user_id,bonus,bonus,'package');
+        update public.profiles set withdrawal_wallet=withdrawal_wallet+bonus where id=referrer;
+      end if;
+    end if;
+  end if;
   return d;
 end; $$;
 grant execute on function public.approve_deposit_and_upgrade_package(uuid,text) to authenticated;
