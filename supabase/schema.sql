@@ -8,19 +8,23 @@ create table if not exists public.profiles (
   referral_code text unique not null,
   referred_by text,
   coins integer not null default 0 check (coins >= 0),
+  deposit_wallet integer not null default 0,
+  withdrawal_wallet integer not null default 0,
   total_tasks integer not null default 0,
+  total_tasks_completed integer not null default 0,
   is_banned boolean not null default false,
-  package_name text not null default 'Free User' check (package_name in ('Free User','Basic Package','Pro Package','Premium Package')),
+  package_name text not null default 'Free' check (package_name in ('Free','Free User','Starter Package','Basic Package','Pro Package','Premium Package')),
   package_activated_at timestamptz,
   created_at timestamptz not null default now()
 );
-alter table public.profiles add column if not exists package_name text not null default 'Free User';
+alter table public.profiles add column if not exists package_name text not null default 'Free';
 alter table public.profiles add column if not exists package_activated_at timestamptz;
 alter table public.profiles add column if not exists deposit_wallet integer not null default 0;
 alter table public.profiles add column if not exists withdrawal_wallet integer not null default 0;
 alter table public.profiles add column if not exists total_tasks_completed integer not null default 0;
+update public.profiles set package_name='Free' where package_name='Free User';
 alter table public.profiles drop constraint if exists profiles_package_name_check;
-alter table public.profiles add constraint profiles_package_name_check check (package_name in ('Free','Free User','Basic Package','Pro Package','Premium Package'));
+alter table public.profiles add constraint profiles_package_name_check check (package_name in ('Free','Free User','Starter Package','Basic Package','Pro Package','Premium Package'));
 alter table public.profiles alter column package_name set default 'Free';
 create table if not exists public.user_roles (
   user_id uuid primary key references public.profiles(id) on delete cascade,
@@ -54,12 +58,15 @@ alter table public.payment_accounts add column if not exists title text;
 alter table public.payment_accounts add column if not exists account_type text;
 alter table public.payment_accounts add column if not exists is_active boolean not null default true;
 create table if not exists public.referral_earnings (
-  id uuid primary key default gen_random_uuid(), referrer_id uuid not null references public.profiles(id) on delete cascade, referred_id uuid not null references public.profiles(id) on delete cascade, coins integer not null default 50, created_at timestamptz not null default now(), unique(referrer_id,referred_id)
+  id uuid primary key default gen_random_uuid(), referrer_id uuid not null references public.profiles(id) on delete cascade, referred_id uuid not null references public.profiles(id) on delete cascade, task_id uuid references public.tasks(id) on delete set null, amount_coins integer not null default 50, coins integer not null default 50, total_earned_so_far integer not null default 0, type text not null default 'task', created_at timestamptz not null default now()
 );
 alter table public.referral_earnings add column if not exists amount_coins integer;
 alter table public.referral_earnings add column if not exists type text not null default 'task';
+alter table public.referral_earnings add column if not exists task_id uuid references public.tasks(id) on delete set null;
+alter table public.referral_earnings add column if not exists total_earned_so_far integer not null default 0;
 alter table public.referral_earnings drop constraint if exists referral_earnings_referrer_id_referred_id_key;
 update public.referral_earnings set amount_coins=coins where amount_coins is null;
+update public.referral_earnings set total_earned_so_far=amount_coins where total_earned_so_far=0;
 create table if not exists public.site_settings (key text primary key, value text not null);
 insert into public.site_settings(key,value) values ('coin_rate','100'),('referral_bonus','50'),('minimum_withdrawal','500'),('site_name','Cash Coin') on conflict(key) do nothing;
 insert into public.tasks(title,description,coins_reward,task_link,category,is_active)
@@ -131,31 +138,36 @@ end; $$;
 drop trigger if exists profiles_referral_code_immutable on public.profiles;
 create trigger profiles_referral_code_immutable before update on public.profiles for each row execute function public.prevent_referral_code_update();
 
-create or replace function public.reward_referrer_on_task(p_referred_id uuid) returns void
+drop function if exists public.reward_referrer_on_task(uuid);
+create or replace function public.reward_referrer_on_task(p_referred_id uuid, p_task_id uuid default null) returns void
 language plpgsql security definer set search_path = public as $$
-declare ref_code text; referrer uuid; earned integer; reward integer;
+declare ref_code text; referrer uuid; earned integer; reward integer; running_total integer;
 begin
   select referred_by into ref_code from public.profiles where id=p_referred_id;
   if ref_code is null then return; end if;
   select id into referrer from public.profiles where upper(referral_code)=upper(ref_code) and id<>p_referred_id limit 1;
   if referrer is null then return; end if;
+  if p_task_id is not null and exists(select 1 from public.referral_earnings where referrer_id=referrer and referred_id=p_referred_id and task_id=p_task_id and type='task') then return; end if;
   select coalesce(sum(amount_coins),0) into earned from public.referral_earnings
     where referrer_id=referrer and referred_id=p_referred_id and type='task';
   if earned>=5000 then return; end if;
   reward := least(200, 5000-earned);
-  insert into public.referral_earnings(referrer_id,referred_id,coins,amount_coins,type) values(referrer,p_referred_id,reward,reward,'task');
+  running_total := earned + reward;
+  insert into public.referral_earnings(referrer_id,referred_id,task_id,coins,amount_coins,total_earned_so_far,type) values(referrer,p_referred_id,p_task_id,reward,reward,running_total,'task');
   update public.profiles set coins=coins+reward where id=referrer;
 end; $$;
-grant execute on function public.reward_referrer_on_task(uuid) to authenticated;
+grant execute on function public.reward_referrer_on_task(uuid,uuid) to authenticated;
 
 create or replace function public.approve_deposit_and_upgrade_package(p_deposit_id uuid, p_package_name text default 'Basic Package')
 returns public.deposits language plpgsql security definer set search_path = public as $$
 declare d public.deposits; ref_code text; referrer uuid; bonus integer;
 begin
   if not public.is_admin() then raise exception 'Admin access required'; end if;
-  if p_package_name not in ('Basic Package','Pro Package','Premium Package') then raise exception 'Invalid package'; end if;
-  update public.deposits set status='approved' where id=p_deposit_id returning * into d;
+  if p_package_name not in ('Starter Package','Basic Package','Pro Package','Premium Package') then raise exception 'Invalid package'; end if;
+  select * into d from public.deposits where id=p_deposit_id;
   if d.id is null then raise exception 'Deposit not found'; end if;
+  if d.status='approved' then return d; end if;
+  update public.deposits set status='approved' where id=p_deposit_id returning * into d;
   update public.profiles set package_name=p_package_name,package_activated_at=now(),deposit_wallet=deposit_wallet+round(d.amount_pkr*100)::int where id=d.user_id;
   select referred_by into ref_code from public.profiles where id=d.user_id;
   if ref_code is not null then
