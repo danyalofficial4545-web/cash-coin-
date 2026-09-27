@@ -98,7 +98,7 @@ begin
   while exists(select 1 from public.profiles where lower(username)=lower(final_username)) loop
     final_username := left(base_username,11) || floor(random()*9000+1000)::int;
   end loop;
-  code := coalesce(nullif(new.raw_user_meta_data->>'referral_code',''),public.random_referral_code(final_username));
+  if tg_op = 'INSERT' then code := upper(substring(md5(random()::text) from 1 for 6)) || upper(substring(md5(random()::text) from 1 for 2)); end if;
   while exists(select 1 from public.profiles where referral_code=code) loop code := public.random_referral_code(final_username); end loop;
   requested_ref := nullif(upper(trim(new.raw_user_meta_data->>'referred_by')),'');
   select p.referral_code,p.id into valid_ref,referrer from public.profiles p where upper(p.referral_code)=requested_ref and p.id<>new.id limit 1;
